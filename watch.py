@@ -1,7 +1,12 @@
 """
-Watches the Wikipedia page for the 2026 U.S. Senate election in Mississippi and
-sends a push notification (via ntfy) every time the general-election vote
-totals change.
+Watches the 2026 U.S. Senate election in Mississippi and sends a push
+notification (via ntfy) every time the general-election vote totals change.
+
+Results sources, tried in order (the one that worked last time is tried first):
+  1. CNN's live-results data file   (AP numbers)
+  2. The New York Times' results data file (AP numbers)
+  3. Wikipedia's race page (backup; only updates when editors add numbers)
+The run log says which source each check used.
 
 Settings come from environment variables (set in the GitHub workflow file):
   NTFY_TOPIC      your private ntfy topic name (stored as a GitHub secret)
@@ -36,13 +41,99 @@ FAILS_BEFORE_ALERT = 5
 
 # ---------------------------------------------------------------- fetching ---
 
-def fetch_wikitext():
-    req = urllib.request.Request(API, headers={"User-Agent": USER_AGENT})
+JSON_SOURCES = {
+    "CNN": "https://politics-elex-results.data.api.cnn.io/results/view/2026-SG-MS.json",
+    "NYT": "https://static01.nyt.com/elections-assets/pages/data/2026-11-03/results-mississippi.json",
+}
+SURNAMES = ["Hyde-Smith", "Colom", "Pinkins"]
+VOTE_KEYS = ["voteNum", "votes", "vote_count", "voteCount", "vote", "popularVote", "votesCast"]
+NAME_KEYS = ["lastName", "last_name", "lastNameOrSurname", "name", "fullName", "candidateName", "nyt_id"]
+
+
+def _get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                               "Accept": "application/json,*/*"})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.load(resp)
+        return resp.read().decode("utf-8", "replace")
+
+
+def fetch_wikitext():
+    data = json.loads(_get(API))
     if "error" in data:
         raise RuntimeError(f"Wikipedia API error: {data['error'].get('info')}")
     return data["parse"]["wikitext"], data["parse"].get("revid")
+
+
+def _votes_of(d):
+    for k in VOTE_KEYS:
+        v = d.get(k)
+        if isinstance(v, dict):
+            v = v.get("total", v.get("count"))
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return int(v)
+        if isinstance(v, str) and re.fullmatch(r"[\d,]+", v.strip()):
+            return int(v.replace(",", ""))
+    return None
+
+
+def _name_of(d):
+    text = " ".join(str(v) for v in d.values() if isinstance(v, (str, int)))
+    for s in SURNAMES:
+        if s.lower() in text.lower():
+            return s
+    for k in NAME_KEYS:
+        if isinstance(d.get(k), str) and d[k].strip():
+            return d[k].strip()
+    return None
+
+
+def parse_json_results(data):
+    """Find the statewide list of candidates in any results JSON.
+
+    Looks for every list of candidate-like objects that includes both
+    Hyde-Smith and Colom with vote counts, and keeps the one with the most
+    votes (the statewide total rather than a single county).
+    """
+    best = None
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+            rows = []
+            for item in node:
+                if isinstance(item, dict):
+                    n, v = _name_of(item), _votes_of(item)
+                    if n and v is not None:
+                        rows.append((n, v))
+            names = {n for n, _ in rows}
+            if all(s in names for s in MUST_INCLUDE):
+                total = sum(v for _, v in rows)
+                if total > 0 and (best is None or total > best[0]):
+                    best = (total, rows)
+    if not best:
+        raise ValueError("No statewide vote counts for both candidates in this file.")
+    return {"candidates": [r for r in best[1] if r[1] > 0]}
+
+
+def get_results(prefer=None):
+    """Try each source; return (results, source_name). Raises if all fail."""
+    order = list(JSON_SOURCES) + ["Wikipedia"]
+    if prefer in order:
+        order.remove(prefer)
+        order.insert(0, prefer)
+    errors = []
+    for name in order:
+        try:
+            if name == "Wikipedia":
+                wikitext, _ = fetch_wikitext()
+                return parse_results(wikitext), name
+            return parse_json_results(json.loads(_get(JSON_SOURCES[name]))), name
+        except Exception as e:
+            errors.append(f"{name}: {str(e)[:120]}")
+    raise RuntimeError(" | ".join(errors))
 
 
 # ----------------------------------------------------------------- parsing ---
@@ -154,7 +245,8 @@ def build_message(current, previous):
 def notify(title, body, priority="high", tags="ballot_box_with_ballot"):
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic:
-        print("NTFY_TOPIC is not set; would have sent:\n", title, "\n", body)
+        print("!!! NTFY_TOPIC SECRET IS MISSING OR EMPTY - no notification sent. Would have sent:\n",
+              title, "\n", body)
         return
     req = urllib.request.Request(
         f"https://ntfy.sh/{urllib.parse.quote(topic)}",
@@ -163,9 +255,12 @@ def notify(title, body, priority="high", tags="ballot_box_with_ballot"):
                  "User-Agent": USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
-    print("Sent notification:", title)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+        print(f"Sent notification to topic ending '...{topic[-4:]}':", title)
+    except Exception as e:
+        print("!!! Could not send notification:", e)
 
 
 # ------------------------------------------------------------------- state ---
@@ -199,8 +294,7 @@ def save_state(state, commit=True):
 def check_once(state):
     """One check. Returns the (possibly updated) state."""
     try:
-        wikitext, revid = fetch_wikitext()
-        current = parse_results(wikitext)
+        current, source = get_results(prefer=state.get("source"))
     except Exception as e:
         state["fail_count"] = state.get("fail_count", 0) + 1
         print(f"[{datetime.now(timezone.utc):%H:%M:%S}] check failed ({state['fail_count']}):", e)
@@ -225,13 +319,13 @@ def check_once(state):
         if first_ever:
             title = "MS Senate watcher is on"
             body = "You'll get an alert each time the totals change.\n\n" + body
-        notify(title, body)
+        notify(title, body + f"\n(Source: {source})")
         state["last"] = current
-        state["last_revid"] = revid
+        state["source"] = source
         state["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_state(state)
     else:
-        print(f"[{datetime.now(timezone.utc):%H:%M:%S}] no change")
+        print(f"[{datetime.now(timezone.utc):%H:%M:%S}] no change ({source})")
     return state
 
 
@@ -239,11 +333,13 @@ def main():
     state = load_state()
 
     if os.environ.get("FORCE_NOTIFY") == "1":
-        wikitext, _ = fetch_wikitext()
-        current = parse_results(wikitext)
+        current, source = get_results()
         title, body = build_message(current, None)
-        notify("TEST · " + title, body)
+        notify("TEST · " + title, body + f"\n(Source: {source})")
         return
+
+    if not os.environ.get("NTFY_TOPIC", "").strip():
+        print("!!! NTFY_TOPIC SECRET IS MISSING OR EMPTY - notifications won't be sent.")
 
     loop_minutes = float(os.environ.get("LOOP_MINUTES", "115"))
     interval = int(os.environ.get("INTERVAL", "60"))
