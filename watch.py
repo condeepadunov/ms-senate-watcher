@@ -36,7 +36,7 @@ API = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
 )
 USER_AGENT = "ms-senate-watcher/1.0 (personal results-notification script)"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
-FAILS_BEFORE_ALERT = 5
+FAILS_BEFORE_ALERT = 3
 
 
 # ---------------------------------------------------------------- fetching ---
@@ -330,7 +330,12 @@ def check_once(state):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # show log lines as they happen
     state = load_state()
+    # Each run alerts once if it can't read results, even if an earlier run already did.
+    state["fail_count"] = 0
+    state["fail_alerted"] = False
+    print("Watcher started. Checking every", os.environ.get("INTERVAL", "60"), "seconds.")
 
     if os.environ.get("FORCE_NOTIFY") == "1":
         current, source = get_results()
