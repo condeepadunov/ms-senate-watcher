@@ -3,9 +3,8 @@ Watches the 2026 U.S. Senate election in Mississippi and sends a push
 notification (via ntfy) every time the general-election vote totals change.
 
 Results sources, tried in order (the one that worked last time is tried first):
-  1. CNN's live-results data file   (AP numbers)
-  2. The New York Times' results data file (AP numbers)
-  3. Wikipedia's race page (backup; only updates when editors add numbers)
+  1. The New York Times' results data file (AP numbers)
+  2. Wikipedia's race page (backup; only updates when editors add numbers)
 The run log says which source each check used.
 
 Settings come from environment variables (set in the GitHub workflow file):
@@ -42,7 +41,6 @@ FAILS_BEFORE_ALERT = 3
 # ---------------------------------------------------------------- fetching ---
 
 JSON_SOURCES = {
-    "CNN": "https://politics-elex-results.data.api.cnn.io/results/view/2026-SG-MS.json",
     "NYT": "https://static01.nyt.com/elections-assets/pages/data/2026-11-03/results-mississippi.json",
 }
 SURNAMES = ["Hyde-Smith", "Colom", "Pinkins"]
@@ -98,16 +96,21 @@ def parse_json_results(data):
     stack = [data]
     while stack:
         node = stack.pop()
+        items = None
         if isinstance(node, dict):
             stack.extend(node.values())
+            # Candidates stored by ID, e.g. {"colom-s": {"votes": ...}, ...}
+            if len(node) >= 2 and all(isinstance(v, dict) for v in node.values()):
+                items = [dict(v, _key=k) for k, v in node.items()]
         elif isinstance(node, list):
             stack.extend(node)
+            items = [i for i in node if isinstance(i, dict)]
+        if items:
             rows = []
-            for item in node:
-                if isinstance(item, dict):
-                    n, v = _name_of(item), _votes_of(item)
-                    if n and v is not None:
-                        rows.append((n, v))
+            for item in items:
+                n, v = _name_of(item), _votes_of(item)
+                if n and v is not None:
+                    rows.append((n, v))
             names = {n for n, _ in rows}
             if all(s in names for s in MUST_INCLUDE):
                 total = sum(v for _, v in rows)
@@ -126,14 +129,47 @@ def get_results(prefer=None):
         order.insert(0, prefer)
     errors = []
     for name in order:
+        raw = None
         try:
             if name == "Wikipedia":
-                wikitext, _ = fetch_wikitext()
-                return parse_results(wikitext), name
-            return parse_json_results(json.loads(_get(JSON_SOURCES[name]))), name
+                raw, _ = fetch_wikitext()
+                return parse_results(raw), name
+            raw = _get(JSON_SOURCES[name])
+            return parse_json_results(json.loads(raw)), name
         except Exception as e:
             errors.append(f"{name}: {str(e)[:120]}")
+            _debug_sample(name, raw)
     raise RuntimeError(" | ".join(errors))
+
+
+_DEBUG_SHOWN = set()
+
+
+def _debug_sample(name, raw):
+    """Once per run, print a short piece of a source's raw data so it can be fixed."""
+    if not raw or name in _DEBUG_SHOWN:
+        return
+    _DEBUG_SHOWN.add(name)
+    print(f"----- {name} sample (for troubleshooting) -----")
+    if name == "Wikipedia":
+        i = raw.find("Colom", raw.lower().find("general election"))
+        i = raw.rfind("{{Election box begin", 0, i) if i > 0 else -1
+        print(raw[max(i, 0):max(i, 0) + 1500])
+    else:
+        try:
+            top = json.loads(raw)
+            if isinstance(top, dict):
+                print("top-level keys:", list(top)[:20])
+        except Exception:
+            pass
+        for key in ("Hyde-Smith", "hyde-smith", "Colom", "colom"):
+            i = raw.find(key)
+            if i >= 0:
+                print(raw[max(0, i - 700):i + 700])
+                break
+        else:
+            print("(no candidate names found) start of file:", raw[:800])
+    print("----- end sample -----")
 
 
 # ----------------------------------------------------------------- parsing ---
@@ -172,6 +208,9 @@ def _params(template_body):
     # Remove refs and nested templates first so their '|' and digits don't interfere.
     body = re.sub(r"<ref[^>]*>.*?</ref>", "", template_body, flags=re.S)
     body = re.sub(r"<ref[^>]*/>", "", body)
+    # Keep numbers written as {{formatnum:123}}, {{nts|123}}, {{Nowrap|123}} etc.
+    body = re.sub(r"\{\{\s*formatnum\s*:\s*([\d,.\s]+)\}\}", r"\1", body, flags=re.I)
+    body = re.sub(r"\{\{\s*(?:nts|ntsh|nowrap|small)\s*\|\s*([\d,.\s]+)\}\}", r"\1", body, flags=re.I)
     while re.search(r"\{\{[^{}]*\}\}", body):
         body = re.sub(r"\{\{[^{}]*\}\}", "", body)
     out = {}
