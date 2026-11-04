@@ -1,0 +1,38 @@
+name: MS Senate watcher
+
+on:
+  # Starts a new watching session every hour. Each session watches for ~2 hours,
+  # and only one runs at a time, so there's always one active.
+  schedule:
+    - cron: "0 * * * *"
+  # Adds a "Run workflow" button on the Actions tab.
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Send a test notification with the current numbers, then stop"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # lets the script save state.json (the last numbers it sent)
+
+concurrency:
+  group: ms-senate-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Watch for new results
+        run: python watch.py
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FORCE_NOTIFY: ${{ inputs.test && '1' || '' }}
+          LOOP_MINUTES: "115"
+          INTERVAL: "60"
