@@ -74,11 +74,43 @@ def _votes_of(d):
     return None
 
 
+_ID_MAP = {}  # candidate ID code -> surname, rebuilt for each file
+
+
+def _build_id_map(data):
+    """Find candidate info entries (with names) and remember their ID codes,
+    so vote entries that only carry an ID can be matched to a name."""
+    found = {}
+    stack = [(None, data)]
+    while stack:
+        key, node = stack.pop()
+        if isinstance(node, dict):
+            strings = {k: v for k, v in node.items() if isinstance(v, (str, int))
+                       and not isinstance(v, bool)}
+            text = " ".join(str(v) for v in strings.values()).lower()
+            hits = [s for s in SURNAMES if s.lower() in text]
+            if len(hits) == 1:
+                ids = [str(v) for v in strings.values()
+                       if re.fullmatch(r"[\w\-]{2,40}", str(v)) and re.search(r"[\d\-_]", str(v))]
+                if key is not None:
+                    ids.append(str(key))
+                for i in ids:
+                    found.setdefault(i, set()).add(hits[0])
+            stack.extend(node.items())
+        elif isinstance(node, list):
+            stack.extend((None, v) for v in node)
+    _ID_MAP.clear()
+    _ID_MAP.update({i: s.pop() for i, s in found.items() if len(s) == 1})
+
+
 def _name_of(d):
     text = " ".join(str(v) for v in d.values() if isinstance(v, (str, int)))
     for s in SURNAMES:
         if s.lower() in text.lower():
             return s
+    for v in d.values():
+        if isinstance(v, (str, int)) and str(v) in _ID_MAP:
+            return _ID_MAP[str(v)]
     for k in NAME_KEYS:
         if isinstance(d.get(k), str) and d[k].strip():
             return d[k].strip()
@@ -92,6 +124,7 @@ def parse_json_results(data):
     Hyde-Smith and Colom with vote counts, and keeps the one with the most
     votes (the statewide total rather than a single county).
     """
+    _build_id_map(data)
     best = None
     stack = [data]
     while stack:
@@ -162,13 +195,17 @@ def _debug_sample(name, raw):
                 print("top-level keys:", list(top)[:20])
         except Exception:
             pass
-        for key in ("Hyde-Smith", "hyde-smith", "Colom", "colom"):
-            i = raw.find(key)
-            if i >= 0:
-                print(raw[max(0, i - 700):i + 700])
-                break
-        else:
-            print("(no candidate names found) start of file:", raw[:800])
+        start = raw.find('"office":"U.S. Senate"')
+        if start < 0:
+            start = 0
+        shown = 0
+        for key in ('"reporting_units"', '"candidates"', '"candidate_metadata"', '"votes"'):
+            i = raw.find(key, start)
+            if i >= 0 and shown < 2:
+                print(f"[{key}]", raw[i:i + 1200])
+                shown += 1
+        if not shown:
+            print("start of Senate race:", raw[start:start + 2500])
     print("----- end sample -----")
 
 
