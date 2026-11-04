@@ -1,6 +1,10 @@
 name: MS Senate watcher
 
 on:
+  # Also starts right away whenever this file is edited and saved.
+  push:
+    paths:
+      - ".github/workflows/ms-senate.yml"
   # Starts a new watching session every hour. Each session watches for ~2 hours,
   # and only one runs at a time, so there's always one active.
   schedule:
