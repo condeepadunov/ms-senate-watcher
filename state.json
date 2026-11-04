@@ -1,4 +1,22 @@
 {
-  "fail_count": 3,
-  "fail_alerted": true
+  "fail_count": 0,
+  "fail_alerted": false,
+  "last": {
+    "candidates": [
+      [
+        "Colom",
+        462821
+      ],
+      [
+        "Hyde-Smith",
+        462778
+      ],
+      [
+        "Pinkins",
+        19935
+      ]
+    ]
+  },
+  "source": "NYT",
+  "updated": "2026-11-04T16:55:06+00:00"
 }
