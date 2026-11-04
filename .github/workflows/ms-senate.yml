@@ -1,12 +1,13 @@
 name: MS Senate watcher
 
 on:
-  # Also starts right away whenever this file is edited and saved.
+  # Restarts right away whenever the script or this file is edited and saved.
   push:
     paths:
       - ".github/workflows/ms-senate.yml"
-  # Starts a new watching session every hour. Each session watches for ~2 hours,
-  # and only one runs at a time, so there's always one active.
+      - "watch.py"
+  # Starts a fresh watching session every hour; it replaces the previous one
+  # (that's why you'll see a gray "cancelled" run each hour - that's normal).
   schedule:
     - cron: "0 * * * *"
   # Adds a "Run workflow" button on the Actions tab.
@@ -22,7 +23,7 @@ permissions:
 
 concurrency:
   group: ms-senate-watcher
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   watch:
@@ -34,8 +35,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Watch for new results
-        run: python watch.py
+        run: python -u watch.py
         env:
+          PYTHONUNBUFFERED: "1"
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FORCE_NOTIFY: ${{ inputs.test && '1' || '' }}
           LOOP_MINUTES: "115"
