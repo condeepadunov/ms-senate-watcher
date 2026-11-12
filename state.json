@@ -1,22 +1,27 @@
 {
+  "race": "AK Senate",
   "fail_count": 0,
   "fail_alerted": false,
   "last": {
     "candidates": [
       [
-        "Colom",
-        473336
+        "Peltola",
+        121487
       ],
       [
-        "Hyde-Smith",
-        468667
+        "Sullivan",
+        117512
       ],
       [
-        "Pinkins",
-        20234
+        "Heikes",
+        5426
+      ],
+      [
+        "Dan J. Sullivan",
+        4100
       ]
     ]
   },
   "source": "NYT",
-  "updated": "2026-11-11T22:55:14+00:00"
+  "updated": "2026-11-12T15:51:19+00:00"
 }
