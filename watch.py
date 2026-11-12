@@ -1,6 +1,10 @@
 """
-Watches the 2026 U.S. Senate election in Mississippi and sends a push
-notification (via ntfy) every time the general-election vote totals change.
+Watches the 2026 U.S. Senate election in Alaska and sends a push
+notification (via ntfy) every time the first-choice vote totals change.
+
+Each alert shows the leader's margin, vote total and share, how far the
+leader is from 50%, and whether Peltola leads both Dan Sullivans combined.
+The two Sullivans are told apart by vote count (the incumbent has far more).
 
 Results sources, tried in order (the one that worked last time is tried first):
   1. The New York Times' results data file (AP numbers)
@@ -24,16 +28,19 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PAGE = "2026_United_States_Senate_election_in_Mississippi"
-# The results table we want is the one that contains both of these names
-# (this skips the primary-election tables on the same page).
-MUST_INCLUDE = ["Hyde-Smith", "Colom"]
+RACE = "AK Senate"
+PAGE = "2026_United_States_Senate_election_in_Alaska"
+# The results table we want is the one that contains both of these names.
+MUST_INCLUDE = ["Peltola", "Sullivan"]
+FOCUS = "Peltola"              # compared against...
+COMBINE = "Sullivan"           # ...every candidate with this surname, added together
+OTHER_SULLIVAN = "Dan J. Sullivan"  # label for the Sullivan with fewer votes
 
 API = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
     {"action": "parse", "page": PAGE, "prop": "wikitext|revid", "format": "json",
      "formatversion": "2"}
 )
-USER_AGENT = "ms-senate-watcher/1.0 (personal results-notification script)"
+USER_AGENT = "senate-results-watcher/1.0 (personal results-notification script)"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 FAILS_BEFORE_ALERT = 3
 
@@ -41,9 +48,10 @@ FAILS_BEFORE_ALERT = 3
 # ---------------------------------------------------------------- fetching ---
 
 JSON_SOURCES = {
-    "NYT": "https://static01.nyt.com/elections-assets/pages/data/2026-11-03/results-mississippi.json",
+    "NYT": "https://static01.nyt.com/elections-assets/pages/data/2026-11-03/results-alaska.json",
 }
-SURNAMES = ["Hyde-Smith", "Colom", "Pinkins"]
+SURNAMES = ["Peltola", "Sullivan", "Heikes"]
+LAST_NAME_KEYS = ["last_name", "lastName", "lastNameOrSurname", "surname"]
 VOTE_KEYS = ["voteNum", "votes", "vote_count", "voteCount", "vote", "popularVote", "votesCast"]
 NAME_KEYS = ["lastName", "last_name", "lastNameOrSurname", "name", "fullName", "candidateName", "nyt_id"]
 
@@ -89,6 +97,13 @@ def _build_id_map(data):
                        and not isinstance(v, bool)}
             text = " ".join(str(v) for v in strings.values()).lower()
             hits = [s for s in SURNAMES if s.lower() in text]
+            # A last-name field settles it even if a bio mentions other candidates.
+            for k in LAST_NAME_KEYS:
+                ln = str(node.get(k, "")).strip().lower()
+                exact = [s for s in SURNAMES if s.lower() == ln]
+                if exact:
+                    hits = exact
+                    break
             if len(hits) == 1:
                 ids = [str(v) for v in strings.values()
                        if re.fullmatch(r"[\w\-]{2,40}", str(v)) and re.search(r"[\d\-_]", str(v))]
@@ -104,6 +119,11 @@ def _build_id_map(data):
 
 
 def _name_of(d):
+    for k in LAST_NAME_KEYS:
+        ln = str(d.get(k, "")).strip().lower()
+        for s in SURNAMES:
+            if s.lower() == ln:
+                return s
     text = " ".join(str(v) for v in d.values() if isinstance(v, (str, int)))
     for s in SURNAMES:
         if s.lower() in text.lower():
@@ -121,7 +141,7 @@ def parse_json_results(data):
     """Find the statewide list of candidates in any results JSON.
 
     Looks for every list of candidate-like objects that includes both
-    Hyde-Smith and Colom with vote counts, and keeps the one with the most
+    the MUST_INCLUDE candidates with vote counts, and keeps the one with the most
     votes (the statewide total rather than a single county).
     """
     _build_id_map(data)
@@ -141,17 +161,41 @@ def parse_json_results(data):
         if items:
             rows = []
             for item in items:
-                n, v = _name_of(item), _votes_of(item)
-                if n and v is not None:
-                    rows.append((n, v))
+                v = _votes_of(item)
+                if v is not None:
+                    # Keep unnamed entries (e.g. write-ins) so the 50% math is right.
+                    rows.append((_name_of(item) or "Write-ins/other", v))
             names = {n for n, _ in rows}
             if all(s in names for s in MUST_INCLUDE):
                 total = sum(v for _, v in rows)
+                # Most votes = statewide first-choice count (not a county, not a later RCV round)
                 if total > 0 and (best is None or total > best[0]):
                     best = (total, rows)
     if not best:
         raise ValueError("No statewide vote counts for both candidates in this file.")
-    return {"candidates": [r for r in best[1] if r[1] > 0]}
+    return normalize(best[1])
+
+
+def normalize(rows):
+    """Give every candidate a short, unique label.
+
+    Both Dan Sullivans usually show up as plain "Sullivan"; the one with more
+    votes is the incumbent and keeps the plain label.
+    """
+    labeled = []
+    for name, votes in rows:
+        label = next((s for s in SURNAMES if s.lower() in name.lower()), name)
+        labeled.append((label, votes))
+    sullivans = sorted([r for r in labeled if r[0] == COMBINE], key=lambda r: -r[1])
+    others = [r for r in labeled if r[0] != COMBINE]
+    renamed = []
+    for i, (_, votes) in enumerate(sullivans):
+        renamed.append((COMBINE if i == 0 else OTHER_SULLIVAN if i == 1 else f"{COMBINE} #{i + 1}", votes))
+    merged = {}
+    for label, votes in renamed + others:
+        merged[label] = merged.get(label, 0) + votes
+    out = sorted(((n, v) for n, v in merged.items() if v > 0), key=lambda r: -r[1])
+    return {"candidates": out}
 
 
 def get_results(prefer=None):
@@ -185,7 +229,7 @@ def _debug_sample(name, raw):
     _DEBUG_SHOWN.add(name)
     print(f"----- {name} sample (for troubleshooting) -----")
     if name == "Wikipedia":
-        i = raw.find("Colom", raw.lower().find("general election"))
+        i = raw.find(FOCUS, raw.lower().find("general election"))
         i = raw.rfind("{{Election box begin", 0, i) if i > 0 else -1
         print(raw[max(i, 0):max(i, 0) + 1500])
     else:
@@ -267,7 +311,12 @@ def parse_results(wikitext):
     """Return {"candidates": [(name, votes), ...]} for the general-election box."""
     boxes = re.findall(r"\{\{\s*Election box begin(.*?)\{\{\s*Election box end",
                        wikitext, flags=re.S | re.I)
+    found_empty = False
+    best = None
     for box in boxes:
+        title = box[:box.find("}}")].lower()  # the box's opening line(s), incl. its title
+        if "primary" in title:   # skip the August primary table
+            continue
         candidates = []
         for body in _templates(box, "Election box candidate"):
             p = _params(body)
@@ -280,42 +329,83 @@ def parse_results(wikitext):
         if all(key.lower() in names.lower() for key in MUST_INCLUDE):
             counted = [(n, v) for n, v in candidates if v]
             if not counted:
-                raise ValueError("Found the results table, but it has no vote counts yet.")
-            return {"candidates": counted}
-    raise ValueError("Couldn't find a results table containing "
+                found_empty = True
+                continue
+            total = sum(v for _, v in counted)
+            # Most votes = first-choice round (later ranked-choice rounds have fewer)
+            if best is None or total > best[0]:
+                best = (total, counted)
+    if best:
+        return normalize(best[1])
+    if found_empty:
+        raise ValueError("Found the results table, but it has no vote counts yet.")
+    raise ValueError("Couldn't find a general-election results table containing "
                      + " and ".join(MUST_INCLUDE) + ".")
 
 
 # ------------------------------------------------------------ notification ---
 
-def short(name):
-    return name.split()[-1]
+def stats(candidates):
+    """Numbers the alert is built from."""
+    cands = sorted(candidates, key=lambda c: -c[1])
+    total = sum(v for _, v in cands)
+    leader, runner = cands[0], cands[1]
+    share = leader[1] / total
+    focus = dict(cands).get(FOCUS, 0)
+    combined = sum(v for n, v in cands if n == COMBINE or n == OTHER_SULLIVAN
+                   or n.startswith(COMBINE + " #"))
+    return {
+        "cands": cands, "total": total, "leader": leader[0], "runner": runner[0],
+        "margin": leader[1] - runner[1], "share": share,
+        "to50": share - 0.5,                         # + above 50%, - below
+        "vs_rest": leader[1] - (total - leader[1]),  # leader minus everyone else combined
+        "vs_combined": focus - combined,             # Peltola minus both Sullivans
+    }
 
 
 def build_message(current, previous):
-    cands = sorted(current["candidates"], key=lambda c: -c[1])
-    total = sum(v for _, v in cands)
-    lines = [f"{short(n)}: {v:,} ({v / total:.2%})" for n, v in cands]
+    s = stats(current["candidates"])
+    p = stats(previous["candidates"]) if previous else None
+    leader = s["leader"]
 
-    leader, runner = cands[0], cands[1]
-    margin = leader[1] - runner[1]
-    lead_line = f"{short(leader[0])} leads by {margin:,} votes"
+    # 1. Lead
+    lead = f"{leader} leads {s['runner']} by {s['margin']:,}"
+    if p:
+        lead += f" (was {p['leader']} +{p['margin']:,})"
 
-    if previous:
+    # 2. Distance from 50%
+    if s["to50"] > 0:
+        fifty = (f"{leader} is ABOVE 50% by {s['to50'] * 100:.2f} pts "
+                 f"(majority of {s['vs_rest']:,} over all others)")
+    else:
+        fifty = (f"{leader} is {abs(s['to50']) * 100:.2f} pts short of 50% "
+                 f"(all others combined lead by {-s['vs_rest']:,})")
+    if p:
+        fifty += f" [was {p['to50'] * 100:+.2f}]"
+
+    # 3. Peltola vs. both Sullivans combined
+    vc = s["vs_combined"]
+    if vc > 0:
+        both = f"{FOCUS} LEADS both Sullivans combined by {vc:,}"
+    elif vc < 0:
+        both = f"{FOCUS} TRAILS both Sullivans combined by {-vc:,}"
+    else:
+        both = f"{FOCUS} is TIED with both Sullivans combined"
+    if p:
+        both += f" (was {p['vs_combined']:+,})"
+
+    lines = [lead, fifty, both, ""]
+    lines += [f"{n}: {v:,} ({v / s['total']:.2%})" for n, v in s["cands"]]
+
+    if p:
         prev = dict(previous["candidates"])
-        pc = sorted(previous["candidates"], key=lambda c: -c[1])
-        if len(pc) >= 2:
-            prev_margin = pc[0][1] - pc[1][1]
-            lead_line += f" (was {short(pc[0][0])} +{prev_margin:,})"
-        changes = []
-        for n, v in cands:
-            if n in prev and v != prev[n]:
-                changes.append(f"{short(n)} {v - prev[n]:+,}")
+        changes = [f"{n} {v - prev[n]:+,}" for n, v in s["cands"] if n in prev and v != prev[n]]
         if changes:
             lines.append("New votes: " + ", ".join(changes))
 
-    title = "MS Senate: " + (f"{short(leader[0])} +{margin:,}" if margin else "TIED")
-    return title, lead_line + "\n" + "\n".join(lines)
+    title = (f"{RACE}: {leader} +{s['margin']:,} · {s['share']:.2%}"
+             if s["margin"] else f"{RACE}: TIED")
+    return title, "\n".join(lines)
 
 
 def notify(title, body, priority="high", tags="ballot_box_with_ballot"):
@@ -375,7 +465,7 @@ def check_once(state):
         state["fail_count"] = state.get("fail_count", 0) + 1
         print(f"[{datetime.now(timezone.utc):%H:%M:%S}] check failed ({state['fail_count']}):", e)
         if state["fail_count"] == FAILS_BEFORE_ALERT and not state.get("fail_alerted"):
-            notify("MS Senate watcher: can't read results",
+            notify(f"{RACE} watcher: can't read results",
                    f"{FAILS_BEFORE_ALERT} checks in a row failed. Last error: {e}",
                    priority="default", tags="warning")
             state["fail_alerted"] = True
@@ -383,7 +473,7 @@ def check_once(state):
         return state
 
     if state.get("fail_alerted"):
-        notify("MS Senate watcher: working again", "Results are readable again.",
+        notify(f"{RACE} watcher: working again", "Results are readable again.",
                priority="low", tags="white_check_mark")
     state["fail_count"] = 0
     state["fail_alerted"] = False
@@ -393,7 +483,7 @@ def check_once(state):
     if first_ever or current["candidates"] != [tuple(c) for c in previous["candidates"]]:
         title, body = build_message(current, None if first_ever else previous)
         if first_ever:
-            title = "MS Senate watcher is on"
+            title = f"{RACE} watcher is on"
             body = "You'll get an alert each time the totals change.\n\n" + body
         notify(title, body + f"\n(Source: {source})")
         state["last"] = current
@@ -408,6 +498,8 @@ def check_once(state):
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # show log lines as they happen
     state = load_state()
+    if state.get("race") != RACE:
+        state = {"race": RACE}   # ignore numbers saved for a different race
     # Each run alerts once if it can't read results, even if an earlier run already did.
     state["fail_count"] = 0
     state["fail_alerted"] = False
