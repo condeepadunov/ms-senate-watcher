@@ -1,4 +1,4 @@
-name: MS Senate watcher
+name: AK Senate watcher
 
 on:
   # Restarts right away whenever the script or this file is edited and saved.
@@ -22,7 +22,7 @@ permissions:
   contents: write   # lets the script save state.json (the last numbers it sent)
 
 concurrency:
-  group: ms-senate-watcher
+  group: senate-watcher
   cancel-in-progress: true
 
 jobs:
